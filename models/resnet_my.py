@@ -5,8 +5,6 @@ import sys
 import chainer
 import chainer.functions as F
 import chainer.links as L
-from chainer.dataset import download
-from chainer.serializers import npz
 
 # Original author: yasunorikudo
 # (https://github.com/yasunorikudo/chainer-ResNet)
@@ -36,13 +34,27 @@ class BottleNeckA(chainer.Chain):
                 initialW=initialW, nobias=True)
             self.bn4 = L.BatchNormalization(out_size)
 
-    def __call__(self, x):
-        h1 = F.relu(self.bn1(self.conv1(x)))
-        h1 = F.relu(self.bn2(self.conv2(h1)))
-        h1 = self.bn3(self.conv3(h1))
-        h2 = self.bn4(self.conv4(x))
+        self.functions = collections.OrderedDict([
+            ('conv1', [self.conv1, self.bn1, F.relu]),
+            ('conv2', [self.conv2, self.bn2, F.relu]),
+            ('conv3', [self.conv3, self.bn3]),
+            ('proj4', [self.conv4, self.bn4]),
+            ('relu5', [F.add, F.relu]),
+        ])
 
-        return F.relu(h1 + h2)
+    def __call__(self, x):
+        h = x
+        for key, funcs in self.functions.items():
+            if key == 'proj4':
+                for func in funcs:
+                    x = func(x)
+            else:
+                for func in funcs:
+                    if func is F.add:
+                        h = func(h, x)
+                    else:
+                        h = func(h)
+        return h
 
 
 class BottleNeckB(chainer.Chain):
@@ -63,12 +75,23 @@ class BottleNeckB(chainer.Chain):
                 ch, in_size, 1, 1, 0, initialW=initialW, nobias=True)
             self.bn3 = L.BatchNormalization(in_size)
 
-    def __call__(self, x):
-        h = F.relu(self.bn1(self.conv1(x)))
-        h = F.relu(self.bn2(self.conv2(h)))
-        h = self.bn3(self.conv3(h))
+        self.functions = collections.OrderedDict([
+            ('conv1', [self.conv1, self.bn1, F.relu]),
+            ('conv2', [self.conv2, self.bn2, F.relu]),
+            ('conv3', [self.conv3, self.bn3]),
+            ('relu4', [F.add, F.relu]),
+        ])
 
-        return F.relu(h + x)
+    def __call__(self, x):
+        h = x
+        for key, funcs in self.functions.items():
+            for func in funcs:
+                if func is F.add:
+                    h = func(h, x)
+                else:
+                    h = func(h)
+        return h
+
 
 
 class Block(chainer.ChainList):
@@ -88,6 +111,7 @@ class Block(chainer.ChainList):
 class ResNet50(chainer.Chain):
 
     insize = 224
+    size = 224
 
     def __init__(self):
         super(ResNet50, self).__init__()
@@ -101,12 +125,31 @@ class ResNet50(chainer.Chain):
             self.res5 = Block(3, 1024, 512, 2048)
             self.fc = L.Linear(2048, 1000)
 
-    def __call__(self, x, t):
-        h = self.predict(x)
+        self.functions = collections.OrderedDict([
+            ('conv1', [self.conv1, self.bn1, F.relu]),
+            ('pool1', [lambda x: F.max_pooling_2d(x, 3, 2)]),
+            ('res2', [self.res2]),
+            ('res3', [self.res3]),
+            ('res4', [self.res4]),
+            ('res5', [self.res5]),
+            ('pool5', [lambda x: F.average_pooling_2d(x, x.shape[2:], 1)]),
+            ('fc6', [self.fc]),
+            ('prob', [F.softmax]),
+        ])
 
-        loss = F.softmax_cross_entropy(h, t)
-        chainer.report({'loss': loss, 'accuracy': F.accuracy(h, t)}, self)
-        return loss
+    def __call__(self, x, layers=['prob']):
+        h = chainer.Variable(x)
+        activations = {'input': h}
+        target_layers = set(layers)
+        for key, funcs in self.functions.items():
+            if len(target_layers) == 0:
+                break
+            for func in funcs:
+                h = func(h)
+            if key in target_layers:
+                activations[key] = h
+                target_layers.remove(key)
+        return activations
 
     def predict(self, x):
         h = self.bn1(self.conv1(x))
@@ -119,9 +162,11 @@ class ResNet50(chainer.Chain):
         h = self.fc(h)
         return h
 
+
 class ResNeXt50(ResNet50):
 
     insize = 224
+    size = 224
 
     def __init__(self):
         chainer.Chain.__init__(self)
@@ -135,3 +180,14 @@ class ResNeXt50(ResNet50):
             self.res5 = Block(3, 1024, 1024, 2048, groups=32)
             self.fc = L.Linear(2048, 1000)
 
+        self.functions = collections.OrderedDict([
+            ('conv1', [self.conv1, self.bn1, F.relu]),
+            ('pool1', [lambda x: F.max_pooling_2d(x, 3, 2)]),
+            ('res2', [self.res2]),
+            ('res3', [self.res3]),
+            ('res4', [self.res4]),
+            ('res5', [self.res5]),
+            ('pool5', [lambda x: F.average_pooling_2d(x, x.shape[2:], 1)]),
+            ('fc6', [self.fc]),
+            ('prob', [F.softmax]),
+        ])
