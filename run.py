@@ -8,46 +8,42 @@ import models
 from lib import backprop
 
 
-p = argparse.ArgumentParser()
-p.add_argument('--input', '-i', default='images/dog_cat.png')
-p.add_argument('--gpu', '-g', type=int, default=-1)
-p.add_argument('--arch', '-a',
-               choices=['alex', 'vgg', 'resnet', 'resnext_my'],
-               default='vgg')
-p.add_argument('--label', '-y', type=int, default=-1)
-p.add_argument('--layer', '-l', default='conv5_3')
-p.add_argument('--model', '-m')
-p.add_argument('--mean')
-args = p.parse_args()
-
-
-if __name__ == '__main__':
-    if args.arch == 'alex':
+def load_model(arch, model_path):
+    if arch == 'alex':
         model = models.Alex()
-    elif args.arch == 'vgg':
+    elif arch == 'vgg':
         model = models.VGG16Layers()
-    elif args.arch == 'resnet':
+    elif arch == 'resnet':
         model = models.ResNet152Layers()
-    elif args.arch == 'resnext_my':
+    elif arch == 'resnext_my':
         model = models.ResNeXt50()
-        chainer.serializers.load_npz(args.model, model)
+        chainer.serializers.load_npz(model_path, model)
+    return model
 
-    if args.gpu >= 0:
-        chainer.cuda.get_device_from_id(args.gpu).use()
-        model.to_gpu()
 
+def load_mean(mean_path):
     mean = None
-    if args.mean is not None:
-        mean = np.load(args.mean)
+    if mean_path is not None:
+        mean = np.load(mean_path)
+    return mean
 
+
+def init_grad_cam(model):
     grad_cam = backprop.GradCAM(model)
     guided_backprop = backprop.GuidedBackprop(model)
+    return (grad_cam, guided_backprop)
 
-    src = cv2.imread(args.input, 1)
-    src = cv2.resize(src, (model.size, model.size))
-    cv2.imwrite('src.png', src)
+
+def load_image(input, size):
+    src_img = cv2.imread(input, 1)
+    src_img = cv2.resize(src_img, size)
+    return src_img
+
+
+def draw(src_img, output_path, model, mean, label, layer, grad_cam, guided_backprop):
+    predict = None
     if mean is not None:
-        x = src.transpose(2, 0, 1).astype(np.float32)
+        x = src_img.transpose(2, 0, 1).astype(np.float32)
         _, h, w = x.shape
         top = (h - model.insize) // 2
         left = (w - model.insize) // 2
@@ -56,25 +52,64 @@ if __name__ == '__main__':
         x -= mean[:, top:bottom, left:right]
         x *= (1.0 / 255.0)  # Scale to [0, 1]
         x = x[np.newaxis, :, :, :]
+        with chainer.using_config('train', False):
+            predict = model.predict(x).data.argmax()
+            output_path += "predict-" + str(predict) + "_"
     else:
-        x = src.astype(np.float32) - np.float32([103.939, 116.779, 123.68])
+        x = src_img.astype(np.float32) - np.float32([103.939, 116.779, 123.68])
         x = x.transpose(2, 0, 1)[np.newaxis, :, :, :]
 
-    gcam = grad_cam.generate(x, args.label, args.layer)
+    gcam = grad_cam.generate(x, label, layer)
     gcam = np.uint8(gcam * 255 / gcam.max())
     gcam = cv2.resize(gcam, (model.size, model.size))
-    gbp = guided_backprop.generate(x, args.label, args.layer)
+    gbp = guided_backprop.generate(x, label, layer)
 
     ggcam = gbp * gcam[:, :, np.newaxis]
     ggcam -= ggcam.min()
     ggcam = 255 * ggcam / ggcam.max()
-    cv2.imwrite('ggcam.png', ggcam)
+    cv2.imwrite(output_path + 'ggcam.png', ggcam)
 
     gbp -= gbp.min()
     gbp = 255 * gbp / gbp.max()
-    cv2.imwrite('gbp.png', gbp)
+    cv2.imwrite(output_path + 'gbp.png', gbp)
 
     heatmap = cv2.applyColorMap(gcam, cv2.COLORMAP_JET)
-    gcam = np.float32(src) + np.float32(heatmap)
+    gcam = np.float32(src_img) + np.float32(heatmap)
     gcam = 255 * gcam / gcam.max()
-    cv2.imwrite('gcam.png', gcam)
+    cv2.imwrite(output_path + 'gcam.png', gcam)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--input', '-i', default='images/dog_cat.png')
+    p.add_argument('--gpu', '-g', type=int, default=-1)
+    p.add_argument('--arch', '-a',
+                   choices=['alex', 'vgg', 'resnet', 'resnext_my'],
+                   default='vgg')
+    p.add_argument('--label', '-y', type=int, default=-1)
+    p.add_argument('--layer', '-l', default='conv5_3')
+    p.add_argument('--model', '-m')
+    p.add_argument('--mean')
+    p.add_argument('--use-ideep', action='store_true')
+    p.set_defaults(use_ideep=False)
+    args = p.parse_args()
+
+    model = load_model(args.arch, args.model)
+
+    if args.gpu >= 0:
+        chainer.cuda.get_device_from_id(args.gpu).use()
+        model.to_gpu()
+
+    if args.use_ideep:
+        chainer.using_config('use_ideep', 'auto')
+        model.to_intel64()
+
+    mean = load_mean(args.mean)
+    src_img = load_image(args.input, (model.size, model.size))
+    (grad_cam, guided_backprop) = init_grad_cam(model)
+    draw(src_img=src_img, output_path="", model=model, mean=mean, label=args.label, layer=args.layer, grad_cam=grad_cam,
+         guided_backprop=guided_backprop)
+
+
+if __name__ == '__main__':
+    main()
