@@ -93,7 +93,6 @@ class BottleNeckB(chainer.Chain):
         return h
 
 
-
 class Block(chainer.ChainList):
 
     def __init__(self, layer, in_size, ch, out_size, stride=2, groups=1):
